@@ -1,0 +1,8 @@
+line-data/
+*.log
+__pycache__/
+*.pyc
+.git
+.gitignore
+.DS_Store
+

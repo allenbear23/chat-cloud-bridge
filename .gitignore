@@ -1,0 +1,12 @@
+# Local Profile & data
+line-data/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
