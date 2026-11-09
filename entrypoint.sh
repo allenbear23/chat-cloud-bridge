@@ -21,7 +21,11 @@ sleep 1
 
 # 4. 啟動 x11vnc 與 noVNC（供網頁瀏覽器打開進行掃碼登入）
 x11vnc -display :99 -forever -nopw -shared -rfbport 5900 &
-/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
+if [ -f "/opt/novnc/utils/novnc_proxy" ]; then
+  /opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
+else
+  websockify --web /usr/share/novnc 6080 localhost:5900 &
+fi
 sleep 1
 
 # 5. 啟動 LINE Bridge HTTP/WS 伺服器
