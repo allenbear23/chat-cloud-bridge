@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  line-bridge:
+    build: .
+    container_name: line-cloud-bridge
+    restart: unless-stopped
+    ports:
+      - "8989:8989"  # 網站後端呼叫的 API Port
+      - "6080:6080"  # 首次掃碼登入專用的 Web VNC 介面 (http://IP:6080/vnc.html)
+    volumes:
+      # 持久化保存登入狀態，重啟容器不需重新登入
+      - ./line-data:/data/chrome-profile
+    environment:
+      - TZ=Asia/Taipei
+    shm_size: '1gb'
+

@@ -1,0 +1,33 @@
+server {
+    listen ${PORT};
+    server_name _;
+
+    # 1. 轉發 API 請求至 Python Bridge Server
+    location /api/ {
+        proxy_pass http://127.0.0.1:8989/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 2. 轉發 noVNC WebSocket 通訊
+    location /websockify {
+        proxy_pass http://127.0.0.1:6080/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 600s;
+    }
+
+    # 3. 根路徑導向 noVNC 桌面介面（供瀏覽器掃碼登入）
+    location / {
+        proxy_pass http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+

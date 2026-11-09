@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: line-cloud-bridge
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /api/status
+    envVars:
+      - key: CHROME_DATA_DIR
+        value: /data/chrome-profile
+
