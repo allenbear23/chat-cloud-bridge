@@ -1,11 +1,9 @@
 services:
   - type: web
-    name: chat-cloud-bridge
-    runtime: docker
+    name: line-cloud-bridge
+    runtime: node
     plan: free
     region: singapore
+    buildCommand: npm install
+    startCommand: npm start
     healthCheckPath: /api/status
-    envVars:
-      - key: CHROME_DATA_DIR
-        value: /data/chrome-profile
-

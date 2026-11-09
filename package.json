@@ -1,0 +1,14 @@
+{
+  "name": "line-nodeless-bridge",
+  "version": "1.0.0",
+  "description": "Pure Node.js LINE self-bot bridge without Docker or Chromium",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@evex-dev/linejs": "^3.6.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
