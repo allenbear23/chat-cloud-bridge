@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: line-cloud-bridge
+    name: chat-cloud-bridge
     runtime: docker
     plan: free
     region: singapore
