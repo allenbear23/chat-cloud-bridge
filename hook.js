@@ -1,22 +1,58 @@
 /**
- * LINE Chrome Extension Automation Hook
- * 建立與本機 Bridge Server 的 WebSocket 通訊，自動選取群組並發送訊息
+ * LINE Chrome Extension Automation Hook (精進版)
+ * 結合官方內部 Redux Action 與 DOM 自動化
+ * 支援：免切換背景發送、@指定人標記、@All 全體標記、訊息收回 (Unsend)
  */
 (function () {
-  console.log("[LINE Hook] Initializing LINE Automation Hook...");
+  console.log("[LINE Hook] Initializing High-Performance LINE Automation Hook...");
 
   const WS_URL = "ws://127.0.0.1:8989";
   let ws = null;
 
   function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // 取得所有可見的聊天室清單項目
+  // 取得全域 Store 與 Actions
+  function getStore() {
+    return window.__REDUX_STORE__ || null;
+  }
+  function getActions() {
+    return window.__LINE_MESSAGE_ACTIONS__ || null;
+  }
+
+  // 透過 Redux State 取得群組或聊天室 MID
+  function findChatMidByName(targetName) {
+    const store = getStore();
+    if (!store) return null;
+    const state = store.getState();
+
+    // 1. 搜尋 messageBoxes
+    const boxes = state?.messageBox?.entities?.messageBoxes || {};
+    for (const [id, box] of Object.entries(boxes)) {
+      const name = box.title || box.name || box.extra?.groupName || "";
+      if (name === targetName || name.includes(targetName) || id === targetName) {
+        return id;
+      }
+    }
+
+    // 2. 搜尋 contacts
+    const contacts = state?.contact?.entities?.contacts || {};
+    for (const [id, contact] of Object.entries(contacts)) {
+      const name = contact.displayNameOverridden || contact.displayName || "";
+      if (name === targetName || name.includes(targetName) || id === targetName) {
+        return id;
+      }
+    }
+
+    return null;
+  }
+
+  // 透過 DOM 取得清單
   function getChatItems() {
     const items = document.querySelectorAll('[class*="chatlistItem-module__chatlist_item"]');
     const result = [];
-    items.forEach(el => {
+    items.forEach((el) => {
       const textEl = el.querySelector('[class*="chatlistItem-module__text"]');
       const title = textEl ? textEl.innerText.trim() : el.innerText.trim();
       result.push({ element: el, title: title });
@@ -24,118 +60,144 @@
     return result;
   }
 
-  // 搜尋群組並點選
-  async function selectChat(targetName) {
-    console.log(`[LINE Hook] Searching for chat: "${targetName}"`);
-
-    // 1. 檢查當前開啟中的聊天室是否已經是目標群組
-    const currentHeader = document.querySelector('[class*="chatroomHeader-module__title"]');
-    if (currentHeader && currentHeader.innerText.includes(targetName)) {
-      console.log(`[LINE Hook] Already in target chat: "${targetName}"`);
-      return true;
-    }
-
-    // 2. 嘗試在可見列表中直接尋找
+  // DOM 方式選取聊天室 (Fallback)
+  async function selectChatDOM(targetName) {
     let chats = getChatItems();
-    let target = chats.find(c => c.title.includes(targetName));
+    let target = chats.find((c) => c.title.includes(targetName));
 
-    // 3. 若找不到，使用搜尋框過濾
     if (!target) {
       const searchInput = document.querySelector('input[class*="searchInput-module__input"], input[type="search"]');
       if (searchInput) {
         searchInput.focus();
-        // 模擬輸入搜尋
         const nativeInputSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         nativeInputSetter.call(searchInput, targetName);
-        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+        searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+        searchInput.dispatchEvent(new Event("change", { bubbles: true }));
         await sleep(500);
 
         chats = getChatItems();
-        target = chats.find(c => c.title.includes(targetName));
+        target = chats.find((c) => c.title.includes(targetName));
       }
     }
 
-    if (!target) {
-      throw new Error(`找不到群組或聊天室: "${targetName}"`);
-    }
-
-    // 點選聊天室
+    if (!target) throw new Error(`找不到群組: "${targetName}"`);
     target.element.click();
-    await sleep(600); // 等待聊天室載入
+    await sleep(500);
 
-    // 清理搜尋框狀態
     const resetBtn = document.querySelector('button[class*="searchInput-module__button_reset"]');
-    if (resetBtn) {
-      resetBtn.click();
-    }
+    if (resetBtn) resetBtn.click();
     return true;
   }
 
-  // 發送訊息
-  async function sendMessage(targetName, messageText) {
-    // 1. 選取目標聊天室
-    await selectChat(targetName);
+  // 核心發送：優先走內部 Action，毫秒級背景發送且支援 Mention
+  async function sendMessage(targetName, messageText, options = {}) {
+    const store = getStore();
+    const actions = getActions();
+    const targetMid = findChatMidByName(targetName);
 
-    // 2. 尋找輸入框 textarea-ex
-    let textareaEx = document.querySelector('textarea-ex');
+    // 組織文字與 Mention 區塊
+    let valuePayload = [];
+    if (options.mentionAll || options.mention === "all") {
+      // 標記全體 @All
+      valuePayload.push({
+        type: 2, // MENTION
+        altText: "@All",
+        extra: { data: { A: "1" } }
+      });
+      valuePayload.push(" " + messageText);
+    } else if (options.mentionMid) {
+      // 標記特定成員
+      const mentionName = options.mentionName || "成員";
+      valuePayload.push({
+        type: 2,
+        altText: `@${mentionName}`,
+        extra: { data: { M: options.mentionMid } }
+      });
+      valuePayload.push(" " + messageText);
+    } else {
+      valuePayload.push(messageText);
+    }
+
+    // 途徑 1：直接透過官方內部 Redux Thunk 發送（免切換視窗、零延遲、E2EE 完全自動）
+    if (store && actions && actions.enqueueTextMessage && targetMid) {
+      console.log(`[LINE Hook] Using direct Action dispatch for "${targetName}" (${targetMid})`);
+      store.dispatch(
+        actions.enqueueTextMessage({
+          messageBoxId: targetMid,
+          value: valuePayload
+        })
+      );
+      return { success: true, method: "redux_action", target: targetName, mid: targetMid, message: messageText };
+    }
+
+    // 途徑 2：回退至 DOM 模擬發送
+    console.warn(`[LINE Hook] Falling back to DOM simulated sending for "${targetName}"`);
+    await selectChatDOM(targetName);
+
+    let textareaEx = document.querySelector("textarea-ex");
     for (let i = 0; i < 10 && !textareaEx; i++) {
       await sleep(200);
-      textareaEx = document.querySelector('textarea-ex');
+      textareaEx = document.querySelector("textarea-ex");
     }
+    if (!textareaEx) throw new Error("無法定位到輸入框 (textarea-ex)");
 
-    if (!textareaEx) {
-      throw new Error("無法定位到訊息輸入框 (textarea-ex)");
-    }
-
-    // 3. 聚焦輸入框
-    if (textareaEx.focus) {
-      textareaEx.focus();
-    }
-
-    // 4. 寫入文字
-    if (typeof textareaEx.insertValue === 'function') {
-      textareaEx.insertValue([messageText]);
-    } else if (textareaEx.inputEl) {
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-      nativeSetter.call(textareaEx.inputEl, messageText);
-      textareaEx.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    if (textareaEx.focus) textareaEx.focus();
+    if (typeof textareaEx.insertValue === "function") {
+      textareaEx.insertValue(valuePayload);
     } else {
-      const innerTextarea = textareaEx.shadowRoot ? textareaEx.shadowRoot.querySelector('textarea') : textareaEx.querySelector('textarea');
+      const innerTextarea = textareaEx.shadowRoot ? textareaEx.shadowRoot.querySelector("textarea") : textareaEx.querySelector("textarea");
       if (innerTextarea) {
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
         nativeSetter.call(innerTextarea, messageText);
-        innerTextarea.dispatchEvent(new Event('input', { bubbles: true }));
-      } else {
-        throw new Error("無法寫入輸入框內容");
+        innerTextarea.dispatchEvent(new Event("input", { bubbles: true }));
       }
     }
 
     await sleep(200);
-
-    // 5. 觸發 Enter 送出
-    const enterEvent = new KeyboardEvent('keydown', {
-      key: 'Enter',
-      code: 'Enter',
+    const enterEvent = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
       keyCode: 13,
       which: 13,
       bubbles: true,
       cancelable: true
     });
-
     textareaEx.dispatchEvent(enterEvent);
-    console.log(`[LINE Hook] Message sent to "${targetName}": "${messageText}"`);
 
-    await sleep(300);
-    return { success: true, target: targetName, message: messageText };
+    return { success: true, method: "dom_simulate", target: targetName, message: messageText };
   }
 
-  // 掛載到 window 供手動測試
+  // 核心功能：收回訊息 (Unsend Message)
+  async function unsendMessage(targetName, messageId) {
+    const store = getStore();
+    const actions = getActions();
+    const targetMid = findChatMidByName(targetName) || targetName;
+
+    if (!store || !actions || !actions.unsendMessage) {
+      throw new Error("內部 unsendMessage Action 尚未就緒");
+    }
+    if (!messageId) {
+      throw new Error("收回訊息必須提供 messageId");
+    }
+
+    console.log(`[LINE Hook] Unsending message "${messageId}" in "${targetName}" (${targetMid})...`);
+    store.dispatch(
+      actions.unsendMessage({
+        messageId: String(messageId),
+        messageBoxId: targetMid
+      })
+    );
+
+    return { success: true, target: targetName, messageId: messageId };
+  }
+
+  // 掛載到 window 供除錯與手動測試
   window.__LINE_HOOK__ = {
     sendMessage,
-    selectChat,
-    getChatItems,
-    getStore: () => window.__REDUX_STORE__
+    unsendMessage,
+    findChatMidByName,
+    getStore,
+    getActions
   };
 
   // 連接本地 Bridge Server (WebSocket)
@@ -151,31 +213,34 @@
     ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log("[LINE Hook] Received command:", data);
 
+        // 1. 發送訊息
         if (data.action === "send") {
           try {
-            const result = await sendMessage(data.target, data.message);
-            ws.send(JSON.stringify({
-              id: data.id,
-              status: "success",
-              result
-            }));
+            const result = await sendMessage(data.target, data.message, data.options || {});
+            ws.send(JSON.stringify({ id: data.id, status: "success", result }));
           } catch (err) {
-            console.error("[LINE Hook] Send failed:", err);
-            ws.send(JSON.stringify({
-              id: data.id,
-              status: "error",
-              error: err.message || String(err)
-            }));
+            ws.send(JSON.stringify({ id: data.id, status: "error", error: err.message || String(err) }));
           }
-        } else if (data.action === "list_chats") {
-          const chats = getChatItems().map(c => c.title);
-          ws.send(JSON.stringify({
-            id: data.id,
-            status: "success",
-            chats
+        }
+        // 2. 收回訊息
+        else if (data.action === "unsend") {
+          try {
+            const result = await unsendMessage(data.target, data.messageId);
+            ws.send(JSON.stringify({ id: data.id, status: "success", result }));
+          } catch (err) {
+            ws.send(JSON.stringify({ id: data.id, status: "error", error: err.message || String(err) }));
+          }
+        }
+        // 3. 取得所有聊天室列表與 MID
+        else if (data.action === "list_chats") {
+          const store = getStore();
+          const boxes = store?.getState()?.messageBox?.entities?.messageBoxes || {};
+          const chats = Object.values(boxes).map((b) => ({
+            id: b.id,
+            name: b.title || b.name || b.extra?.groupName || "未命名"
           }));
+          ws.send(JSON.stringify({ id: data.id, status: "success", chats }));
         }
       } catch (err) {
         console.error("[LINE Hook] Error parsing message:", err);
@@ -183,16 +248,12 @@
     };
 
     ws.onclose = () => {
-      console.log("[LINE Hook] Disconnected. Reconnecting in 3s...");
       setTimeout(connectWebSocket, 3000);
     };
-
-    ws.onerror = (err) => {
-      // 靜默關閉，由 onclose 處理重連
+    ws.onerror = () => {
       ws.close();
     };
   }
 
-  // 啟動連線
   connectWebSocket();
 })();

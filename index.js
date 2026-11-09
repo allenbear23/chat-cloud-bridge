@@ -1,6 +1,6 @@
 /**
- * 純 Node.js LINE 副機器人發送服務
- * 完全不需 Docker、不需 Chromium、記憶體佔用小於 50MB
+ * 純 Node.js LINE 副機器人發送服務 (精進版)
+ * 支援：免 Docker、免 Chromium、發送文字、標記 @All、收回訊息 (Unsend)
  */
 
 import http from "node:http";
@@ -17,10 +17,9 @@ let currentProfile = null;
 let qrStatus = {
   url: null,
   pin: null,
-  status: "idle" // idle | waiting_scan | waiting_pin | logged_in
+  status: "idle"
 };
 
-// 讀取既有 Token
 function getSavedToken() {
   if (process.env.LINE_AUTH_TOKEN) return process.env.LINE_AUTH_TOKEN.trim();
   if (fs.existsSync(TOKEN_FILE)) {
@@ -33,17 +32,15 @@ function getSavedToken() {
   return null;
 }
 
-// 儲存 Token
 function saveToken(token) {
   try {
     fs.writeFileSync(TOKEN_FILE, token, "utf-8");
-    console.log("[Auth] Token 已持久化保存至 line_token.txt");
+    console.log("[Auth] Token 已保存至 line_token.txt");
   } catch (err) {
     console.error("[Auth] 保存 Token 失敗:", err.message);
   }
 }
 
-// 初始化 LINE 客戶端
 async function initClient() {
   const token = getSavedToken();
   if (token) {
@@ -52,65 +49,57 @@ async function initClient() {
       client = await loginWithAuthToken(token);
       currentProfile = await client.getMyProfile();
       qrStatus.status = "logged_in";
-      console.log(`[Auth] 登入成功！使用者: ${currentProfile.displayName} (MID: ${currentProfile.mid})`);
+      console.log(`[Auth] 登入成功！使用者: ${currentProfile.displayName}`);
       return;
     } catch (err) {
-      console.warn("[Auth] 既有 Token 已失效或過期，請重新掃碼登入:", err.message);
+      console.warn("[Auth] 既有 Token 已過期:", err.message);
     }
   }
 
-  // 若無 Token 或失效，開始 QR Code 登入流程
   startQrLogin();
 }
 
-// 啟動 QR Code 登入
 async function startQrLogin() {
   qrStatus.status = "waiting_scan";
-  console.log("[Auth] 正在請求 LINE 登入 QR Code...");
+  console.log("[Auth] 正在請求登入 QR Code...");
 
   try {
     client = await loginWithQR({
       onReceiveQRUrl: (url) => {
         qrStatus.url = url;
         qrStatus.status = "waiting_scan";
-        console.log("\n================ [請使用手機 LINE 掃碼登入] ================");
+        console.log("\n================ [請手機掃碼登入] ================");
         console.log("登入連結: " + url);
         qrcodeTerminal.generate(url, { small: true });
-        console.log("============================================================\n");
+        console.log("==================================================\n");
       },
       onPincodeRequest: (pin) => {
         qrStatus.pin = pin;
         qrStatus.status = "waiting_pin";
-        console.log("\n>>> 請在手機 LINE 輸入此 PIN 驗證碼: [ " + pin + " ] <<<\n");
+        console.log(`\n>>> 請在手機輸入 PIN 驗證碼: [ ${pin} ] <<<\n`);
       }
     });
 
     const authToken = client.base.authToken;
-    if (authToken) {
-      saveToken(authToken);
-    }
+    if (authToken) saveToken(authToken);
 
     currentProfile = await client.getMyProfile();
     qrStatus.status = "logged_in";
-    console.log(`[Auth] 掃碼登入成功！登入者: ${currentProfile.displayName}`);
+    console.log(`[Auth] 掃碼登入成功！使用者: ${currentProfile.displayName}`);
   } catch (err) {
-    console.error("[Auth] QR Code 登入流程出錯:", err);
+    console.error("[Auth] QR Code 登入錯誤:", err);
     qrStatus.status = "error";
-    // 5 秒後可重試
     setTimeout(startQrLogin, 5000);
   }
 }
 
-// 根據群組名稱尋找聊天室並發送訊息
-async function sendMessageToTarget(targetName, text) {
+// 發送訊息 (支援 Mention)
+async function sendMessageToTarget(targetName, text, options = {}) {
   if (!client || qrStatus.status !== "logged_in") {
-    throw new Error("LINE 客戶端尚未登入完成，請先開啟登入網址掃碼。");
+    throw new Error("LINE 客戶端尚未登入完成");
   }
 
-  console.log(`[Message] 搜尋群組: "${targetName}"...`);
   const chats = await client.fetchJoinedChats();
-  
-  // 優先精確比對名稱，其次比對包含名稱或 ID
   let targetChat = chats.find(c => (c.name || c.extra?.groupName) === targetName);
   if (!targetChat) {
     targetChat = chats.find(c => ((c.name || c.extra?.groupName) || "").includes(targetName));
@@ -120,23 +109,42 @@ async function sendMessageToTarget(targetName, text) {
   }
 
   if (!targetChat) {
-    const chatNames = chats.map(c => c.name || c.extra?.groupName).filter(Boolean);
-    throw new Error(`找不到名稱為 "${targetName}" 的群組。目前已加入群組有: [${chatNames.join(", ")}]`);
+    throw new Error(`找不到群組 "${targetName}"`);
   }
 
-  console.log(`[Message] 找到群組: "${targetChat.name || targetChat.mid}"，正在發送訊息...`);
-  await targetChat.sendMessage(text);
-  console.log(`[Message] 發送成功: "${text}"`);
+  // 標記處理
+  let sendText = text;
+  if (options.mention === "all" || options.mentionAll) {
+    sendText = `@All ${text}`;
+  } else if (options.mentionName) {
+    sendText = `@${options.mentionName} ${text}`;
+  }
+
+  const res = await targetChat.sendMessage(sendText);
   return {
     chatId: targetChat.mid,
     chatName: targetChat.name || targetChat.extra?.groupName,
-    message: text
+    messageId: res?.id || null,
+    message: sendText
   };
 }
 
-// 建立輕量 HTTP 伺服器
+// 收回訊息
+async function unsendMessage(messageId) {
+  if (!client || qrStatus.status !== "logged_in") {
+    throw new Error("LINE 客戶端尚未登入");
+  }
+  if (!messageId) throw new Error("缺少 messageId");
+
+  if (client.base?.talk?.unsendMessage) {
+    await client.base.talk.unsendMessage({ reqSeq: 0, messageId: String(messageId) });
+  } else {
+    throw new Error("底層協定未支援 unsendMessage 函式");
+  }
+  return { success: true, messageId };
+}
+
 const server = http.createServer(async (req, res) => {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -149,67 +157,76 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // 1. 狀態檢查 API
   if (url.pathname === "/api/status") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
       status: qrStatus.status === "logged_in" ? "online" : "offline",
       connected_clients: qrStatus.status === "logged_in" ? 1 : 0,
-      login_status: qrStatus.status,
       user: currentProfile ? { displayName: currentProfile.displayName, mid: currentProfile.mid } : null
     }));
     return;
   }
 
-  // 2. 登入網頁 (瀏覽器打開可直接掃碼)
   if (url.pathname === "/login" || url.pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     if (qrStatus.status === "logged_in") {
       res.end(`
         <div style="font-family:sans-serif; text-align:center; padding:50px;">
-          <h2 style="color:#00B900;">✓ LINE 副機器人已登入完成</h2>
-          <p>帳號：<b>${currentProfile?.displayName || "已連線"}</b></p>
-          <p>服務運作中，可直接由後端呼叫發送 API。</p>
+          <h2 style="color:#00B900;">✓ LINE 副機器人已登入</h2>
+          <p>帳號：<b>${currentProfile?.displayName || ""}</b></p>
         </div>
       `);
     } else if (qrStatus.url) {
       res.end(`
         <div style="font-family:sans-serif; text-align:center; padding:40px;">
           <h2>LINE 副機器人掃碼登入</h2>
-          <p>請使用手機 LINE 掃描下方 QR Code，或點擊連結登入：</p>
-          <div style="margin:20px 0;">
-            <a href="${qrStatus.url}" target="_blank" style="font-size:16px; color:#00B900; word-break:break-all;">點此開啟登入連結</a>
-          </div>
-          ${qrStatus.pin ? `<h3 style="color:#e74c3c;">驗證碼 (PIN Code): <span style="font-size:32px; background:#f8f9fa; padding:4px 12px; border:1px solid #ccc; border-radius:4px;">${qrStatus.pin}</span></h3><p>請在手機跳出驗證時輸入上方 4 位數字</p>` : `<p>（若手機提示需要驗證碼，請刷新此頁面查看）</p>`}
+          <p><a href="${qrStatus.url}" target="_blank" style="color:#00B900;">點此開啟登入連結</a></p>
+          ${qrStatus.pin ? `<h3>PIN: <span style="font-size:28px;">${qrStatus.pin}</span></h3>` : ""}
           <script>setTimeout(() => location.reload(), 4000);</script>
         </div>
       `);
     } else {
-      res.end(`
-        <div style="font-family:sans-serif; text-align:center; padding:50px;">
-          <h3>正在產生登入資訊，請稍候...</h3>
-          <script>setTimeout(() => location.reload(), 2000);</script>
-        </div>
-      `);
+      res.end(`<h3>正在產生 QR Code...</h3><script>setTimeout(() => location.reload(), 2000);</script>`);
     }
     return;
   }
 
-  // 3. 發送訊息 API (POST /api/send)
   if (url.pathname === "/api/send" && req.method === "POST") {
     let body = "";
     req.on("data", chunk => { body += chunk; });
     req.on("end", async () => {
       try {
         const data = JSON.parse(body || "{}");
-        const { target, message } = data;
+        const { target, message, mention, mentionAll, mentionName } = data;
         if (!target || !message) {
           res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ success: false, error: "缺少 target 或 message 參數" }));
+          res.end(JSON.stringify({ success: false, error: "缺少 target 或 message" }));
           return;
         }
+        const result = await sendMessageToTarget(target, message, { mention, mentionAll, mentionName });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: true, detail: result }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: false, error: err.message || String(err) }));
+      }
+    });
+    return;
+  }
 
-        const result = await sendMessageToTarget(target, message);
+  if (url.pathname === "/api/unsend" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body || "{}");
+        const { messageId } = data;
+        if (!messageId) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ success: false, error: "缺少 messageId" }));
+          return;
+        }
+        const result = await unsendMessage(messageId);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ success: true, detail: result }));
       } catch (err) {
@@ -225,6 +242,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`[Server] 純 Node.js LINE 橋接伺服器正在運行於 Port: ${PORT}`);
+  console.log(`[Server] 純 Node.js LINE 服務運行於 Port: ${PORT}`);
   initClient();
 });
