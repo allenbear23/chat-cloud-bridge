@@ -1,6 +1,5 @@
 /**
- * LINE Bridge Client for Node.js (精進版)
- * 支援：普通發送、@All 全體標記、@指定成員標記、收回訊息 (Unsend)
+ * LINE Bridge Client for Node.js (安全監聽與速率版)
  */
 
 class LineBridgeClient {
@@ -20,21 +19,32 @@ class LineBridgeClient {
   }
 
   /**
-   * 發送訊息 (支援 Mention)
-   * @param {string} target - 目標群組名稱或 MID
-   * @param {string} message - 訊息文字
+   * 獲取被動接收到的最近訊息 (0 請求率安全讀取)
    * @param {Object} [options]
-   * @param {boolean} [options.mentionAll] - 是否標記 @All
-   * @param {string} [options.mentionMid] - 欲標記的使用者 MID
-   * @param {string} [options.mentionName] - 欲標記的使用者名稱
+   * @param {number} [options.limit=20] - 筆數
+   * @param {string} [options.chatId] - 指定群組或聊天室 MID
+   */
+  async getRecentMessages(options = {}) {
+    try {
+      const params = new URLSearchParams();
+      if (options.limit) params.set("limit", options.limit);
+      if (options.chatId) params.set("chatId", options.chatId);
+
+      const res = await fetch(`${this.baseUrl}/api/messages?${params.toString()}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.messages || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 發送訊息 (內建速率冷卻保護)
    */
   async sendMessage(target, message, options = {}) {
     try {
-      const payload = {
-        target,
-        message,
-        ...options
-      };
+      const payload = { target, message, ...options };
       if (options.mentionAll) payload.mention = "all";
 
       const res = await fetch(`${this.baseUrl}/api/send`, {
@@ -54,9 +64,7 @@ class LineBridgeClient {
   }
 
   /**
-   * 收回已發送的訊息
-   * @param {string} target - 目標群組名稱或 MID
-   * @param {string} messageId - 欲收回的訊息序號 ID
+   * 收回訊息
    */
   async unsendMessage(target, messageId) {
     try {

@@ -1,6 +1,5 @@
 """
-LINE Bridge Client for Python (精進版)
-支援：普通發送、@All 全體標記、@指定成員標記、收回訊息 (Unsend)
+LINE Bridge Client for Python (安全監聽與速率版)
 """
 
 import os
@@ -20,6 +19,19 @@ class LineBridgeClient:
                 return data.get("status") == "online" and data.get("connected_clients", 0) > 0
         except Exception:
             return False
+
+    def get_recent_messages(self, limit: int = 50, chat_id: str = "") -> list:
+        """獲取被動接收到的最近訊息 (安全讀取)"""
+        try:
+            url = f"{self.base_url}/api/messages?limit={limit}"
+            if chat_id:
+                url += f"&chatId={urllib.parse.quote(chat_id)}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("messages", [])
+        except Exception:
+            return []
 
     def send_message(self, target: str, message: str, mention_all: bool = False, mention_mid: str = None, mention_name: str = None, timeout_sec: float = 15.0) -> dict:
         payload = {
